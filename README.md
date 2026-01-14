@@ -118,20 +118,27 @@ codesign -s - --entitlements entitlements.plist -f vz_gui
 | virtio-gpu | 16 | Working | 1280x720 display, PCI and MMIO variants |
 | virtio-console | 3 | Working | Serial I/O via virtio-pci |
 
+### In Progress
+
+Currently being implemented with automated tests:
+
+| Driver | Device ID | Status | Test |
+|--------|-----------|--------|------|
+| **virtio-rng** | 4 | 🔄 In Progress | Read random bytes, verify entropy |
+| **virtio-blk** | 2 | 🔄 In Progress | Write pattern, read back, verify |
+| **virtio-net** | 1 | 🔄 In Progress | Initialize device, send/receive packet |
+| **virtio-balloon** | 5 | 🔄 In Progress | Inflate/deflate memory |
+
 ### Planned (VZ-supported)
 
 These devices are supported by macOS Virtualization.framework:
 
 | Driver | Device ID | Priority | Complexity | VZ Class |
 |--------|-----------|----------|------------|----------|
-| **virtio-rng** | 4 | High | Very Low | `VZVirtioEntropyDeviceConfiguration` |
 | **virtio-input** | 18 | High | Low | `VZVirtioKeyboardConfiguration`, `VZVirtioPointingDeviceConfiguration` |
-| **virtio-blk** | 2 | High | Low | `VZVirtioBlockDeviceConfiguration` |
-| **virtio-net** | 1 | High | Medium | `VZVirtioNetworkDeviceConfiguration` |
 | **virtio-fs** | 26 | Medium | High | `VZVirtioFileSystemDeviceConfiguration` |
 | **virtio-vsock** | 19 | Medium | Medium | `VZVirtioSocketDeviceConfiguration` |
 | **virtio-sound** | 25 | Low | Medium | `VZVirtioSoundDeviceConfiguration` |
-| **virtio-balloon** | 5 | Low | Low | `VZVirtioTraditionalMemoryBalloonDeviceConfiguration` |
 
 ### All VirtIO Device Types (Reference)
 

@@ -305,11 +305,12 @@ impl VirtioGpu {
             // VZ WORKAROUND: BARs are not programmed by VZ - we must do it ourselves!
             // Based on Linux dmesg, GPU BAR0 should be at 0x50008000
             // Program BAR0 with this address if it's currently zero
+            // NOTE: Check masked address, not raw value - type bits (0xF) might be set
             let bar0_ptr = (config_base + 0x10) as *mut u32;
             let bar0_val = read_volatile(bar0_ptr);
-            if bar0_val == 0 {
+
+            if (bar0_val & 0xFFFFFFF0) == 0 {
                 // GPU BAR0 address from Linux: 50008000-5000bfff (16KB)
-                // This is a 32-bit Memory BAR (bits 0-3 are type flags, we set to 0)
                 write_volatile(bar0_ptr, 0x50008000);
                 fence(Ordering::SeqCst);
             }

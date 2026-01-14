@@ -74,6 +74,25 @@ config.networkDevices = [networkDevice]
 // Entropy
 config.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
 
+// Memory balloon
+config.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+
+// Block device (create a small test disk)
+let diskPath = "/tmp/vz_test_disk.img"
+// Create 1MB disk if it doesn't exist
+if !FileManager.default.fileExists(atPath: diskPath) {
+    FileManager.default.createFile(atPath: diskPath, contents: nil)
+    let handle = try! FileHandle(forWritingTo: URL(fileURLWithPath: diskPath))
+    handle.truncateFile(atOffset: 1024 * 1024)  // 1MB
+    handle.closeFile()
+}
+let diskAttachment = try! VZDiskImageStorageDeviceAttachment(
+    url: URL(fileURLWithPath: diskPath),
+    readOnly: false
+)
+let blockDevice = VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
+config.storageDevices = [blockDevice]
+
 // Validate
 do {
     try config.validate()

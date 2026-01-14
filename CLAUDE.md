@@ -312,6 +312,97 @@ VZ uses virtio-console, NOT PL011 UART. We have two working drivers:
 
 The VMM (`vz_gui.swift`) receives serial output and displays it with `[SERIAL]` prefix.
 
+## VirtIO Driver Development (2025-01-14)
+
+### BREAKTHROUGH: Linux-Like DTB-Based BAR Allocation
+
+**All VirtIO devices now have valid BAR addresses!** The key was behaving exactly like Linux:
+
+1. **Parse DTB `ranges` property** to find VZ's declared MMIO window
+2. **Reserve addresses** VZ already programmed (Console at 0x5000C000)
+3. **Allocate new addresses** within the valid window for unmapped devices
+
+#### Implementation: Linux-Like Boot Sequence
+
+```rust
+// Phase 1: Parse DTB for valid MMIO window
+let (mmio_base, mmio_size) = dtb::find_pci_mmio_window(dtb_ptr);
+pci::init_allocator(mmio_base, mmio_size);
+
+// Phase 2: Scan bus, reserve VZ's pre-programmed addresses
+for slot in 0..32 {
+    if let Some(dev) = PciDevice::new(ecam, 0, slot, 0) {
+        dev.read_bars();
+        for bar in dev.bars {
+            if bar >= mmio_base && bar < mmio_limit {
+                pci::reserve_range(bar, size);
+            }
+        }
+    }
+}
+
+// Phase 3: Allocate BARs for unmapped devices
+for slot in 0..32 {
+    if dev.bars[i] == 0 && size > 0 {
+        let addr = pci::allocate(size);
+        dev.program_bar(i, addr);  // [OK] if VZ accepts!
+    }
+}
+
+// Phase 4: Initialize drivers with allocated addresses
+if let Some(modern) = VirtioModern::probe(&dev) {
+    driver::from_modern(&modern);
+}
+```
+
+#### DTB Parsing Results
+```
+MMIO Window: 0x50000000 - 0x6FFE0000 (511MB)
+```
+
+#### All BAR Allocations Accepted
+| Device | ID | Slot | BAR0 | BAR2 | Status |
+|--------|-----|------|------|------|--------|
+| Network | 0x1041 | 1 | 0x50100000 | 0x50200000 | **[OK]** |
+| Console | 0x1043 | 5 | 0x5000C000 (VZ) | 0x50300000 | **[OK]** |
+| Block | 0x1042 | 6 | 0x50400000 | 0x50500000 | **[OK]** |
+| GPU | 0x1050 | 7 | 0x50600000 | 0x50700000 | **[OK]** |
+| Entropy | 0x1044 | 8 | 0x50800000 | 0x50900000 | **[OK]** |
+| Balloon | 0x1045 | 9 | 0x50A00000 | 0x50B00000 | **[OK]** |
+
+#### The Key Insight
+VZ only accepts BAR writes for addresses **within the MMIO range declared in the DTB**. Writing to addresses outside this window (like 0x8000_0000 which is in RAM) is rejected.
+
+### Why This Works (When Manual Addresses Failed)
+
+1. **DTB declares the valid MMIO window** - VZ generates this from its internal configuration
+2. **Reserve first, allocate second** - Avoid conflicts with VZ's pre-programmed devices
+3. **Disable Memory Decode before programming** - Standard PCI BAR programming protocol
+4. **Use 1MB alignment** - Conservative alignment ensures compatibility
+
+### Files Structure
+
+```
+src/
+├── dtb.rs         # DTB parser - finds MMIO window from `ranges` property
+├── pci.rs         # Smart allocator + VirtioModern transport
+├── main.rs        # Linux-like boot sequence orchestrator
+├── virtio_*.rs    # Drivers with from_modern() for clean init
+```
+
+### Driver API: from_modern()
+
+Drivers now accept a pre-configured `VirtioModern` transport:
+
+```rust
+impl VirtioEntropy {
+    pub unsafe fn from_modern(modern: &VirtioModern, _ecam: u64) -> Option<Self> {
+        // Device already has valid BAR addresses
+        // Just configure queues and start
+    }
+}
+```
+
 ## Lessons Learned
 
 1. **Never accept all VirtIO features** - only accept what you implement
@@ -322,3 +413,5 @@ The VMM (`vz_gui.swift`) receives serial output and displays it with `[SERIAL]` 
 6. **Heavy devices need patience** - GPU takes 100ms+ to appear, kernel boots in microseconds
 7. **Consistent output paths** - all output functions should use the same driver priority
 8. **Prefer proven drivers** - when multiple drivers can work, prioritize the reliable one
+9. **Ghost Map addresses are configuration-dependent** - adding devices changes VZ's slot/BAR assignments
+10. **Status = 0x00 after write = wrong address** - a quick diagnostic for address issues

@@ -55,54 +55,45 @@ fn uart_putc(c: u8) {
 }
 
 fn putc(c: u8) {
-    // Prefer virtio_pci - proven more reliable
+    // 1. ALWAYS write to UART first (stateless, cannot hang)
+    uart_putc(c);
+
+    // 2. ALSO write to VirtIO PCI if available
     unsafe {
         if USE_VIRTIO_PCI {
             if let Some(ref console) = VIRTIO_PCI_CONSOLE {
                 console.putc(c);
-                return;
-            }
-        }
-        if USE_VIRTIO {
-            if let Some(ref console) = VIRTIO_CONSOLE {
-                console.putc(c);
-                return;
             }
         }
     }
 
-    // Try virtio-console (VZ) as fallback
+    // 3. ALSO write to VirtIO Console if available
     if virtio_console::console_available() {
         virtio_console::putc(c);
-        return;
     }
-
-    uart_putc(c);
 }
 
 fn puts(s: &str) {
-    // Prefer virtio_pci if available - it's proven more reliable
+    // 1. Send to UART char-by-char (stateless, reliable)
+    for b in s.bytes() {
+        if b == b'\n' {
+            uart_putc(b'\r');
+        }
+        uart_putc(b);
+    }
+
+    // 2. Send to VirtIO PCI (batch)
     unsafe {
         if USE_VIRTIO_PCI {
             if let Some(ref console) = VIRTIO_PCI_CONSOLE {
                 console.puts(s);
-                return;
             }
         }
     }
 
-    // Try virtio-console (VZ) as fallback
+    // 3. Send to VirtIO Console (batch)
     if virtio_console::console_available() {
         virtio_console::puts(s);
-        return;
-    }
-
-    // Fallback: character by character
-    for b in s.bytes() {
-        if b == b'\n' {
-            putc(b'\r');
-        }
-        putc(b);
     }
 }
 
@@ -115,25 +106,23 @@ fn print_hex(n: u64) {
         buf[2 + i] = hex[((n >> ((15 - i) * 4)) & 0xF) as usize];
     }
 
-    // Prefer virtio_pci if available - same priority as puts()
+    // 1. Send to UART (stateless)
+    for &b in &buf {
+        uart_putc(b);
+    }
+
+    // 2. Send to VirtIO PCI (batch)
     unsafe {
         if USE_VIRTIO_PCI {
             if let Some(ref console) = VIRTIO_PCI_CONSOLE {
                 console.write(&buf);
-                return;
             }
         }
     }
 
-    // Try virtio-console (VZ) as fallback
+    // 3. Send to VirtIO Console (batch)
     if virtio_console::console_available() {
         virtio_console::write_bytes(&buf);
-        return;
-    }
-
-    // Fallback
-    for &b in &buf {
-        putc(b);
     }
 }
 
@@ -353,6 +342,62 @@ pub unsafe fn debug_scan_pci(ecam_base: u64) -> ! {
 
 #[no_mangle]
 pub extern "C" fn kmain(dtb_ptr: u64) -> ! {
+    // No blind delays! They starve VZ device initialization threads.
+
+    let ecam: u64 = 0x40000000;
+
+    // -----------------------------------------------------------------------
+    // PATIENCE SCANNER FIRST: Bring up console BEFORE any output!
+    // VZ devices take time to appear - run this before trying to print anything.
+    // -----------------------------------------------------------------------
+    for attempt in 1u32..=50 {
+        // Check if console device exists on bus
+        let console_exists = unsafe {
+            let mut found = false;
+            for dev in 0u64..32 {
+                let addr = ecam + (dev << 15);
+                let header = core::ptr::read_volatile(addr as *const u32);
+                let vendor_id = (header & 0xFFFF) as u16;
+                let device_id = ((header >> 16) & 0xFFFF) as u16;
+                // Console device IDs: 0x1043 (modern) or 0x1003 (legacy)
+                if vendor_id == 0x1AF4 && (device_id == 0x1043 || device_id == 0x1003) {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+
+        // Try virtio_pci console init
+        if console_exists && unsafe { !USE_VIRTIO_PCI } {
+            if let Some(console) = virtio_pci::find_virtio_pci_console(ecam) {
+                unsafe {
+                    VIRTIO_PCI_CONSOLE = Some(console);
+                    USE_VIRTIO_PCI = true;
+                }
+                // Console is up! We can start outputting now.
+                break;
+            }
+        }
+
+        // Try virtio_console as fallback ONLY if virtio_pci failed
+        // (both drivers target the same device - double init kills it!)
+        if console_exists && unsafe { !USE_VIRTIO_PCI } && !virtio_console::console_available() {
+            virtio_console::console_init();
+            if virtio_console::console_available() {
+                // Console is up!
+                break;
+            }
+        }
+
+        // Wait ~10ms before retry
+        for _ in 0..1_000_000u64 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // Now console should be up (if device exists). Safe to output.
+
     // Collect PCI device info for display on GPU later
     unsafe {
         core::arch::asm!("dsb sy");
@@ -370,107 +415,9 @@ pub extern "C" fn kmain(dtb_ptr: u64) -> ! {
         }
     }
 
-    // Try console init (BAR programming disabled now)
-    virtio_console::console_init();
-
-    // REGISTER CANARY v4: Find GPU specifically
-    // CRASH = GPU not found (brk #2)
-    // NO CRASH = GPU found, use found_gpu_dev for init
-    let found_gpu_dev: u64;
-    unsafe {
-        let ecam_base: u64 = 0x40000000;
-        let mut gpu_dev: u64 = 0xFF;
-
-        // Scan ALL 32 slots looking for GPU
-        for dev in 0u64..32 {
-            let addr = ecam_base + (dev << 15);
-            let header = core::ptr::read_volatile(addr as *const u32);
-            let vendor_id = (header & 0xFFFF) as u16;
-            let device_id = ((header >> 16) & 0xFFFF) as u16;
-
-            // Check for virtio GPU (vendor 0x1AF4, device 0x1050 modern or 0x1040 transitional)
-            if vendor_id == 0x1AF4 && (device_id == 0x1050 || device_id == 0x1040) {
-                gpu_dev = dev;
-                break;
-            }
-        }
-
-        // If gpu_dev is still 0xFF, no GPU was found - but continue anyway
-        found_gpu_dev = gpu_dev;
-    }
-
-    // --- Rest of kernel continues if virtio was found ---
-
     unsafe {
         debug_write_u32(0, DEBUG_MAGIC);
         debug_write_u64(8, dtb_ptr);
-    }
-
-    // FIRST: Try probing ECAM addresses for virtio-pci console
-    // VZ ECAM is at 0x40000000 (confirmed from Linux dmesg)
-    let common_ecams: &[u64] = &[
-        0x40000000, // VZ ECAM (confirmed!)
-        0x10000000,
-        0x3f000000,
-    ];
-
-    for &ecam in common_ecams {
-        if unsafe { !USE_VIRTIO_PCI } {
-            if let Some(console) = virtio_pci::find_virtio_pci_console(ecam) {
-                unsafe {
-                    VIRTIO_PCI_CONSOLE = Some(console);
-                    USE_VIRTIO_PCI = true;
-                    debug_write_str(4, "PCI-PROBE");
-                }
-                break;
-            }
-        }
-    }
-
-    // If still no console, try from DTB
-    if unsafe { !USE_VIRTIO_PCI } {
-        if let Some(ecam) = unsafe { pci::find_ecam_from_dtb(dtb_ptr) } {
-            unsafe { debug_write_u64(24, ecam); }
-            if let Some(console) = virtio_pci::find_virtio_pci_console(ecam) {
-                unsafe {
-                    VIRTIO_PCI_CONSOLE = Some(console);
-                    USE_VIRTIO_PCI = true;
-                    debug_write_str(4, "PCI-DTB");
-                }
-            }
-        }
-    }
-
-    // Try virtio-mmio from DTB
-    if unsafe { !USE_VIRTIO && !USE_VIRTIO_PCI } {
-        if let Some(addr) = unsafe { find_virtio_from_dtb(dtb_ptr) } {
-            unsafe {
-                FOUND_VIRTIO_ADDR = addr;
-                debug_write_u64(16, addr);
-            }
-            if let Some(console) = virtio::VirtioConsole::try_new(addr as usize) {
-                unsafe {
-                    VIRTIO_CONSOLE = Some(console);
-                    USE_VIRTIO = true;
-                    debug_write_str(4, "DTB");
-                }
-            }
-        }
-    }
-
-    // Fallback: try probing known MMIO addresses
-    if unsafe { !USE_VIRTIO && !USE_VIRTIO_PCI } {
-        if let Some(console) = virtio::VirtioConsole::probe() {
-            unsafe {
-                VIRTIO_CONSOLE = Some(console);
-                USE_VIRTIO = true;
-                debug_write_str(4, "MMIO");
-            }
-        } else {
-            unsafe {
-                debug_write_str(4, "PL011");
-            }
-        }
     }
 
     puts("\n=== aarch64 Unikernel ===\n");
@@ -482,15 +429,8 @@ pub extern "C" fn kmain(dtb_ptr: u64) -> ! {
         unsafe {
             if USE_VIRTIO_PCI {
                 puts("Output: virtio-pci\n");
-            } else if USE_VIRTIO {
-                puts("Output: virtio-mmio\n");
-                if FOUND_VIRTIO_ADDR != 0 {
-                    puts("Virtio addr: ");
-                    print_hex(FOUND_VIRTIO_ADDR);
-                    puts("\n");
-                }
             } else {
-                puts("Output: PL011 UART\n");
+                puts("Output: No VirtIO console\n");
             }
         }
     }
@@ -532,10 +472,9 @@ pub extern "C" fn kmain(dtb_ptr: u64) -> ! {
     let mut gpu_result: Option<virtio_gpu::VirtioGpu> = None;
 
     // -----------------------------------------------------------------------
-    // PATIENCE SCANNER v2: Scan ALL slots, repeatedly
+    // GPU PATIENCE SCANNER: Scan ALL slots, repeatedly
     // -----------------------------------------------------------------------
     puts("Scanning for GPU (Patience Mode)...\n");
-    let ecam: u64 = 0x40000000;
 
     // Try for ~5 seconds
     for attempt in 1u32..=50 {
@@ -602,8 +541,8 @@ pub extern "C" fn kmain(dtb_ptr: u64) -> ! {
             }
         }
 
-        // Wait ~100ms
-        for _ in 0..10_000_000u64 {
+        // Wait ~10ms (deterministic delay)
+        for _ in 0..1_000_000u64 {
             core::hint::spin_loop();
         }
     }
@@ -655,6 +594,33 @@ pub extern "C" fn kmain(dtb_ptr: u64) -> ! {
 
             gpu.flush();
             puts("Graphics rendered!\n");
+
+            // Output test verification data
+            let (checksum, non_zero) = gpu.framebuffer_checksum();
+            puts("TEST:FB_CHECKSUM=");
+            print_hex(checksum as u64);
+            puts("\n");
+            puts("TEST:FB_NONZERO=");
+            print_hex(non_zero as u64);
+            puts("\n");
+
+            // Sample pixels should be non-zero (colored boxes drawn)
+            let samples = gpu.sample_test_pixels();
+            puts("TEST:PIXELS=");
+            for (i, &p) in samples.iter().enumerate() {
+                if i > 0 { puts(","); }
+                print_hex(p as u64);
+            }
+            puts("\n");
+
+            // Verify pixels are not all black
+            let all_black = samples.iter().all(|&p| p == 0);
+            if all_black {
+                puts("TEST:GRAPHICS=FAIL (all black)\n");
+            } else {
+                puts("TEST:GRAPHICS=PASS\n");
+            }
+
             gpu_initialized = true;
         }
     }

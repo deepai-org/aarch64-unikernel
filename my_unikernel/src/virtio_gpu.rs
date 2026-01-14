@@ -767,6 +767,50 @@ impl VirtioGpu {
 
     pub fn width(&self) -> u32 { self.width }
     pub fn height(&self) -> u32 { self.height }
+
+    /// Compute a simple checksum of the framebuffer for testing
+    /// Returns (checksum, non_zero_pixels) for verification
+    pub fn framebuffer_checksum(&self) -> (u32, u32) {
+        const PIXELS: usize = 1280 * 720;
+        let mut checksum: u32 = 0;
+        let mut non_zero: u32 = 0;
+
+        unsafe {
+            let ptr = HARDCODED_FB_ADDR as *const u32;
+            for i in 0..PIXELS {
+                let pixel = ptr.add(i).read_volatile();
+                // Simple checksum: XOR with position-mixed value
+                checksum = checksum.wrapping_add(pixel ^ (i as u32).wrapping_mul(0x9e3779b9));
+                if pixel != 0 {
+                    non_zero += 1;
+                }
+            }
+        }
+        (checksum, non_zero)
+    }
+
+    /// Sample specific pixels for test verification
+    /// Returns array of pixel values at test coordinates
+    pub fn sample_test_pixels(&self) -> [u32; 5] {
+        const WIDTH: usize = 1280;
+        let test_coords = [
+            (100, 150),   // First colored box area
+            (330, 150),   // Second colored box area
+            (560, 150),   // Third colored box area
+            (640, 20),    // Title bar area
+            (640, 500),   // Background area
+        ];
+
+        let mut samples = [0u32; 5];
+        unsafe {
+            let ptr = HARDCODED_FB_ADDR as *const u32;
+            for (i, (x, y)) in test_coords.iter().enumerate() {
+                let idx = y * WIDTH + x;
+                samples[i] = ptr.add(idx).read_volatile();
+            }
+        }
+        samples
+    }
 }
 
 // ECAM addresses to try

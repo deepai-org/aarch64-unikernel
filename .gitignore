@@ -1,0 +1,35 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# macOS
+.DS_Store
+
+# VMM binaries (built locally)
+vmm/hvf_vmm
+vmm/vz_gui
+vmm/vz_vmm
+vmm/vmm
+
+# Test Linux kernels/images (large)
+vmm/*.iso
+vmm/alpine_extract/
+vmm/initramfs-*
+vmm/initrd-*
+vmm/linux-*
+vmm/vmlinuz-*
+
+# Debug/log files
+vmm/*.ppm
+vmm/*.png
+vmm/*.log
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug files
+*.dSYM/

@@ -109,6 +109,108 @@ swiftc -o vz_gui vz_gui.swift -framework Virtualization -framework AppKit
 codesign -s - --entitlements entitlements.plist -f vz_gui
 ```
 
+## VirtIO Driver Roadmap
+
+### Implemented
+
+| Driver | Device ID | Status | Notes |
+|--------|-----------|--------|-------|
+| virtio-gpu | 16 | Working | 1280x720 display, PCI and MMIO variants |
+| virtio-console | 3 | Working | Serial I/O via virtio-pci |
+
+### Planned (VZ-supported)
+
+These devices are supported by macOS Virtualization.framework:
+
+| Driver | Device ID | Priority | Complexity | VZ Class |
+|--------|-----------|----------|------------|----------|
+| **virtio-rng** | 4 | High | Very Low | `VZVirtioEntropyDeviceConfiguration` |
+| **virtio-input** | 18 | High | Low | `VZVirtioKeyboardConfiguration`, `VZVirtioPointingDeviceConfiguration` |
+| **virtio-blk** | 2 | High | Low | `VZVirtioBlockDeviceConfiguration` |
+| **virtio-net** | 1 | High | Medium | `VZVirtioNetworkDeviceConfiguration` |
+| **virtio-fs** | 26 | Medium | High | `VZVirtioFileSystemDeviceConfiguration` |
+| **virtio-vsock** | 19 | Medium | Medium | `VZVirtioSocketDeviceConfiguration` |
+| **virtio-sound** | 25 | Low | Medium | `VZVirtioSoundDeviceConfiguration` |
+| **virtio-balloon** | 5 | Low | Low | `VZVirtioTraditionalMemoryBalloonDeviceConfiguration` |
+
+### All VirtIO Device Types (Reference)
+
+Complete list from the VirtIO specification:
+
+| ID | Device | Description | VZ Support |
+|----|--------|-------------|------------|
+| 1 | net | Network card | Yes |
+| 2 | blk | Block device (disk) | Yes |
+| 3 | console | Serial console | Yes |
+| 4 | rng | Entropy/random | Yes |
+| 5 | balloon | Memory ballooning | Yes |
+| 8 | scsi | SCSI host adapter | No |
+| 9 | 9p | 9P filesystem | No |
+| 16 | gpu | Graphics | Yes |
+| 18 | input | Keyboard/mouse/tablet | Yes |
+| 19 | vsock | Host-guest sockets | Yes |
+| 20 | crypto | Cryptographic ops | No |
+| 23 | iommu | IOMMU | No |
+| 24 | mem | Memory hotplug | No |
+| 25 | sound | Audio | Yes |
+| 26 | fs | Filesystem sharing | Yes |
+| 27 | pmem | Persistent memory | No |
+| 29 | mac80211-hwsim | WiFi simulation | No |
+| 30 | video | Video encode/decode | No |
+| 40 | bt | Bluetooth | No |
+| 41 | gpio | GPIO pins | No |
+| 42 | i2c | I2C adapter | No |
+
+### Implementation Notes
+
+**virtio-rng** (Easiest)
+- Single virtqueue, read-only
+- Just submit buffer, device fills with random bytes
+- No complex state machine
+
+**virtio-input** (Keyboard/Mouse)
+- Event-based input (EV_KEY, EV_REL, EV_ABS)
+- Makes GPU interactive
+- Need event queue processing
+
+**virtio-blk** (Block Device)
+- Request/response for read/write/flush
+- Sector-based I/O (512 bytes)
+- Foundation for filesystem
+
+**virtio-net** (Networking)
+- TX and RX virtqueues
+- Ethernet frames
+- Needs TCP/IP stack (e.g., smoltcp) for useful networking
+
+**virtio-fs** (Filesystem)
+- FUSE-based protocol
+- Most complex - full filesystem semantics
+- Share host directories with guest
+
+### Dependencies
+
+```
+virtio-rng ─────────────────────────────> (standalone)
+
+virtio-input ──────────────────────────-> virtio-gpu (interactive graphics)
+
+virtio-blk ────> filesystem layer ─────-> (persistent storage)
+
+virtio-net ────> TCP/IP stack (smoltcp) -> (networking)
+
+virtio-fs ─────> FUSE protocol layer ───-> (host file access)
+```
+
+## Contributing
+
+PRs welcome! See the driver roadmap above for what's needed. Each driver should:
+
+1. Live in `my_unikernel/src/virtio_<device>.rs`
+2. Follow VirtIO 1.0 spec (split virtqueues, feature negotiation)
+3. Handle both PCI (for VZ) and optionally MMIO (for HVF)
+4. Use fixed DMA addresses for queue structures
+
 ## License
 
 MIT
